@@ -3,16 +3,6 @@ name: Build NxNative iOS IPA (RAR + Older Device Support)
 on:
   workflow_dispatch:
     inputs:
-      repo_url:
-        description: "NxNative repo URL (4ppp44/nxnative-ios17 for older A15/A16/non-BC iPhones, or seedds/nxnative for A17 Pro+)"
-        required: true
-        default: "https://github.com"
-        type: string
-      branch:
-        description: "Branch name (leave empty for default branch)"
-        required: false
-        default: ""
-        type: string
       separate_romfs:
         description: "Split RomFS into a separate file (recommended for large games / AltStore)"
         required: false
@@ -48,14 +38,7 @@ jobs:
         run: xcodebuild -downloadComponent MetalToolchain
 
       - name: Clone NxNative Repository
-        run: |
-          CLEAN_URL=$(printf '%s' "${{ inputs.repo_url }}" | tr -d '\r\n ')
-          CLEAN_BRANCH=$(printf '%s' "${{ inputs.branch }}" | tr -d '\r\n ')
-          BRANCH_FLAG=""
-          if [ -n "$CLEAN_BRANCH" ]; then
-            BRANCH_FLAG="-b $CLEAN_BRANCH"
-          fi
-          git clone --depth 1 $BRANCH_FLAG "$CLEAN_URL" nxnative
+        run: git clone --depth 1 https://github.com nxnative
 
       - name: Install Homebrew & Python dependencies
         run: |
