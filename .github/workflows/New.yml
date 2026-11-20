@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       repo_url:
-        description: "NxNative repo URL (use 4ppp44/nxnative-ios17 for older A16/non-BC iPhones, or seedds/nxnative for A17 Pro+)"
+        description: "NxNative repo URL (4ppp44/nxnative-ios17 for older A15/A16/non-BC iPhones, or seedds/nxnative for A17 Pro+)"
         required: true
         default: "https://github.com"
         type: string
@@ -33,7 +33,7 @@ jobs:
       - name: Check available disk space
         run: df -h
 
-      - name: Select Xcode 27.2
+      - name: Select Xcode
         run: |
           if [ -d "/Applications/Xcode_27.2.app" ]; then
             sudo xcode-select -s /Applications/Xcode_27.2.app
@@ -49,11 +49,13 @@ jobs:
 
       - name: Clone NxNative Repository
         run: |
+          CLEAN_URL=$(printf '%s' "${{ inputs.repo_url }}" | tr -d '\r\n ')
+          CLEAN_BRANCH=$(printf '%s' "${{ inputs.branch }}" | tr -d '\r\n ')
           BRANCH_FLAG=""
-          if [ -n "${{ inputs.branch }}" ]; then
-            BRANCH_FLAG="-b ${{ inputs.branch }}"
+          if [ -n "$CLEAN_BRANCH" ]; then
+            BRANCH_FLAG="-b $CLEAN_BRANCH"
           fi
-          git clone --depth 1 $BRANCH_FLAG "${{ inputs.repo_url }}" nxnative
+          git clone --depth 1 $BRANCH_FLAG "$CLEAN_URL" nxnative
 
       - name: Install Homebrew & Python dependencies
         run: |
@@ -76,12 +78,14 @@ jobs:
           [ -n "$UPDATE_URL" ] && gdown --fuzzy "$UPDATE_URL"
           [ -n "$DLC_URL" ] && gdown --fuzzy "$DLC_URL"
 
+          # Extract any .rar, .zip, or .7z archives and delete them immediately to save disk space
           for f in *.rar *.zip *.7z; do
             if [ -f "$f" ]; then
               unar -f "$f" && rm "$f"
             fi
           done
 
+          # Move extracted .nsp/.xci/.nsz/.xcz files out of nested subfolders into game_files/
           find . -mindepth 2 -type f \( -iname "*.nsp" -o -iname "*.xci" -o -iname "*.nsz" -o -iname "*.xcz" \) -exec mv {} . \;
 
       - name: Build iOS IPA
