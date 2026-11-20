@@ -38,7 +38,9 @@ jobs:
         run: xcodebuild -downloadComponent MetalToolchain
 
       - name: Clone NxNative Repository
-        run: git clone --depth 1 https://github.com nxnative
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh repo clone 4ppp44/nxnative-ios17 nxnative -- --depth 1
 
       - name: Install Homebrew & Python dependencies
         run: |
@@ -61,14 +63,12 @@ jobs:
           [ -n "$UPDATE_URL" ] && gdown --fuzzy "$UPDATE_URL"
           [ -n "$DLC_URL" ] && gdown --fuzzy "$DLC_URL"
 
-          # Extract any .rar, .zip, or .7z archives and delete them immediately to save disk space
           for f in *.rar *.zip *.7z; do
             if [ -f "$f" ]; then
               unar -f "$f" && rm "$f"
             fi
           done
 
-          # Move extracted .nsp/.xci/.nsz/.xcz files out of nested subfolders into game_files/
           find . -mindepth 2 -type f \( -iname "*.nsp" -o -iname "*.xci" -o -iname "*.nsz" -o -iname "*.xcz" \) -exec mv {} . \;
 
       - name: Build iOS IPA
