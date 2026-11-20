@@ -1,15 +1,20 @@
-name: Build NxNative iOS IPA
+name: Build NxNative iOS IPA (RAR + No-BC Support)
 
 on:
   workflow_dispatch:
     inputs:
+      no_bc_support:
+        description: "Use no-bc fork for older devices without BC texture support (e.g., A15 / A16 iPhones)"
+        required: false
+        default: true
+        type: boolean
       separate_romfs:
         description: "Split RomFS into a separate file (recommended for large games / AltStore)"
         required: false
         default: true
         type: boolean
       extra_flags:
-        description: "Additional flags for build_ipa_from_nsp.py (e.g., --shader-files)"
+        description: "Additional flags for build_ipa_from_nsp.py (e.g., --shader-files --show-fps)"
         required: false
         default: ""
         type: string
@@ -37,16 +42,23 @@ jobs:
       - name: Download Metal Toolchain
         run: xcodebuild -downloadComponent MetalToolchain
 
-      - name: Clone nxnative
-        run: git clone --depth 1 https://github.com/seedds/nxnative.git nxnative
+      - name: Clone NxNative Repository
+        run: |
+          if [ "${{ inputs.no_bc_support }}" == "true" ]; then
+            echo "Cloning no-bc fork for A15/A16 and older iPhones..."
+            git clone --depth 1 -b no-bc https://github.com nxnative
+          else
+            echo "Cloning upstream seedds/nxnative..."
+            git clone --depth 1 https://github.com nxnative
+          fi
 
       - name: Install Homebrew & Python dependencies
         run: |
-          brew install xcodegen zstd glslang
+          brew install xcodegen zstd glslang unar
           python3 -m pip install --upgrade pip
           python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'" gdown
 
-      - name: Download Game Files and Keys
+      - name: Download and Extract Game Files (.rar / .zip / .7z)
         env:
           GAME_URL: ${{ secrets.GAME_URL }}
           KEYS_URL: ${{ secrets.KEYS_URL }}
@@ -55,22 +67,21 @@ jobs:
         run: |
           mkdir -p game_files keys
           gdown --fuzzy "$KEYS_URL" -O keys/prod.keys
-          gdown --fuzzy "$GAME_URL" -O game_files/base.nsp
 
-          if [ -n "$UPDATE_URL" ]; then
-            gdown --fuzzy "$UPDATE_URL" -O game_files/update.nsp
-          fi
-          if [ -n "$DLC_URL" ]; then
-            gdown --fuzzy "$DLC_URL" -O game_files/dlc.nsp
-          fi
-
-          # Extract if the downloaded base game is a zip/7z archive
           cd game_files
-          for f in *; do
-            case "$f" in
-              *.zip) unzip -o "$f" && rm "$f" ;;
-            esac
+          gdown --fuzzy "$GAME_URL"
+          [ -n "$UPDATE_URL" ] && gdown --fuzzy "$UPDATE_URL"
+          [ -n "$DLC_URL" ] && gdown --fuzzy "$DLC_URL"
+
+          # Extract any .rar, .zip, or .7z archives and delete them immediately to save disk space
+          for f in *.rar *.zip *.7z; do
+            if [ -f "$f" ]; then
+              unar -f "$f" && rm "$f"
+            fi
           done
+
+          # Move extracted .nsp/.xci/.nsz/.xcz files out of nested subfolders into game_files/
+          find . -mindepth 2 -type f \( -iname "*.nsp" -o -iname "*.xci" -o -iname "*.nsz" -o -iname "*.xcz" \) -exec mv {} . \;
 
       - name: Build iOS IPA
         run: |
