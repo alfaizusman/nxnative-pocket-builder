@@ -1,0 +1,94 @@
+name: Build NxNative iOS IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      separate_romfs:
+        description: "Split RomFS into a separate file (recommended for large games / AltStore)"
+        required: false
+        default: true
+        type: boolean
+      extra_flags:
+        description: "Additional flags for build_ipa_from_nsp.py (e.g., --shader-files)"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check available disk space
+        run: df -h
+
+      - name: Select Xcode 27.2
+        run: |
+          if [ -d "/Applications/Xcode_27.2.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_27.2.app
+          elif [ -d "/Applications/Xcode-27.2.app" ]; then
+            sudo xcode-select -s /Applications/Xcode-27.2.app
+          else
+            sudo xcode-select -s /Applications/Xcode.app
+          fi
+          xcodebuild -version
+
+      - name: Download Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - name: Clone nxnative
+        run: git clone --depth 1 https://github.com/seedds/nxnative.git nxnative
+
+      - name: Install Homebrew & Python dependencies
+        run: |
+          brew install xcodegen zstd glslang
+          python3 -m pip install --upgrade pip
+          python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'" gdown
+
+      - name: Download Game Files and Keys
+        env:
+          GAME_URL: ${{ secrets.GAME_URL }}
+          KEYS_URL: ${{ secrets.KEYS_URL }}
+          UPDATE_URL: ${{ secrets.UPDATE_URL }}
+          DLC_URL: ${{ secrets.DLC_URL }}
+        run: |
+          mkdir -p game_files keys
+          gdown --fuzzy "$KEYS_URL" -O keys/prod.keys
+          gdown --fuzzy "$GAME_URL" -O game_files/base.nsp
+
+          if [ -n "$UPDATE_URL" ]; then
+            gdown --fuzzy "$UPDATE_URL" -O game_files/update.nsp
+          fi
+          if [ -n "$DLC_URL" ]; then
+            gdown --fuzzy "$DLC_URL" -O game_files/dlc.nsp
+          fi
+
+          # Extract if the downloaded base game is a zip/7z archive
+          cd game_files
+          for f in *; do
+            case "$f" in
+              *.zip) unzip -o "$f" && rm "$f" ;;
+            esac
+          done
+
+      - name: Build iOS IPA
+        run: |
+          ROMFS_FLAG=""
+          if [ "${{ inputs.separate_romfs }}" == "true" ]; then
+            ROMFS_FLAG="--romfs separate"
+          fi
+
+          python3 nxnative/scripts/build_ipa_from_nsp.py game_files \
+            -k keys/prod.keys \
+            $ROMFS_FLAG \
+            ${{ inputs.extra_flags }}
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: NxNative-iOS-Build
+          path: |
+            game_files/*.ipa
+            game_files/*.img
+          if-no-files-found: error
