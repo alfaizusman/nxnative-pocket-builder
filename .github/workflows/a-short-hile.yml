@@ -20,6 +20,16 @@ jobs:
           ref: no-bc
           path: nxnative
 
+      - name: Verify No-BC checkout
+        working-directory: nxnative
+        run: |
+          set -euo pipefail
+          echo "Current branch:"
+          git branch --show-current
+          echo "Commit:"
+          git rev-parse HEAD
+          test "$(git branch --show-current)" = "no-bc"
+
       - name: Check available disk space
         run: df -h /
 
@@ -101,8 +111,37 @@ jobs:
       - name: Diagnose extracted game files
         run: |
           set -euo pipefail
-          find "$RUNNER_TEMP/short-hike" -type f -iname '*.nsp' \
-            -exec file {} \;
+          find "$RUNNER_TEMP/short-hike" -type f -print0 |
+          while IFS= read -r -d '' f; do
+            echo "File: $f"
+            file "$f"
+          done
+
+      - name: Validate NSP package headers
+        run: |
+          set -euo pipefail
+
+          NSP_COUNT=0
+
+          while IFS= read -r -d '' f; do
+            NSP_COUNT=$((NSP_COUNT + 1))
+            echo "Checking: $f"
+
+            HEADER="$(xxd -p -l 4 "$f")"
+            echo "Header: $HEADER"
+
+            test "$HEADER" = "50465330" || {
+              echo "Invalid NSP PFS0 header: $f"
+              exit 1
+            }
+          done < <(find "$RUNNER_TEMP/short-hike" -type f -iname '*.nsp' -print0)
+
+          test "$NSP_COUNT" -gt 0 || {
+            echo "No NSP packages found."
+            exit 1
+          }
+
+          echo "Validated $NSP_COUNT NSP package(s)."
 
       - name: Build unsigned A Short Hike IPA
         working-directory: nxnative
