@@ -1,20 +1,25 @@
-name: Build NxNative iOS IPA (RAR + No-BC Support)
+name: Build NxNative iOS IPA (RAR + Older Device Support)
 
 on:
   workflow_dispatch:
     inputs:
-      no_bc_support:
-        description: "Use no-bc fork for older devices without BC texture support (e.g., A15 / A16 iPhones)"
+      repo_url:
+        description: "NxNative repo URL (use 4ppp44/nxnative-ios17 for older A16/non-BC iPhones, or seedds/nxnative for A17 Pro+)"
+        required: true
+        default: "https://github.com"
+        type: string
+      branch:
+        description: "Branch name (leave empty for default branch)"
         required: false
-        default: true
-        type: boolean
+        default: ""
+        type: string
       separate_romfs:
         description: "Split RomFS into a separate file (recommended for large games / AltStore)"
         required: false
         default: true
         type: boolean
       extra_flags:
-        description: "Additional flags for build_ipa_from_nsp.py (e.g., --shader-files --show-fps)"
+        description: "Additional flags for build_ipa_from_nsp.py"
         required: false
         default: ""
         type: string
@@ -44,13 +49,11 @@ jobs:
 
       - name: Clone NxNative Repository
         run: |
-          if [ "${{ inputs.no_bc_support }}" == "true" ]; then
-            echo "Cloning no-bc fork for A15/A16 and older iPhones..."
-            git clone --depth 1 -b no-bc https://github.com nxnative
-          else
-            echo "Cloning upstream seedds/nxnative..."
-            git clone --depth 1 https://github.com nxnative
+          BRANCH_FLAG=""
+          if [ -n "${{ inputs.branch }}" ]; then
+            BRANCH_FLAG="-b ${{ inputs.branch }}"
           fi
+          git clone --depth 1 $BRANCH_FLAG "${{ inputs.repo_url }}" nxnative
 
       - name: Install Homebrew & Python dependencies
         run: |
@@ -73,14 +76,12 @@ jobs:
           [ -n "$UPDATE_URL" ] && gdown --fuzzy "$UPDATE_URL"
           [ -n "$DLC_URL" ] && gdown --fuzzy "$DLC_URL"
 
-          # Extract any .rar, .zip, or .7z archives and delete them immediately to save disk space
           for f in *.rar *.zip *.7z; do
             if [ -f "$f" ]; then
               unar -f "$f" && rm "$f"
             fi
           done
 
-          # Move extracted .nsp/.xci/.nsz/.xcz files out of nested subfolders into game_files/
           find . -mindepth 2 -type f \( -iname "*.nsp" -o -iname "*.xci" -o -iname "*.nsz" -o -iname "*.xcz" \) -exec mv {} . \;
 
       - name: Build iOS IPA
