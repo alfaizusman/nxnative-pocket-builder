@@ -30,7 +30,7 @@ jobs:
           xcodebuild -version
           xcodebuild -downloadComponent MetalToolchain
           brew update
-          brew install python@3.12 xcodegen zstd glslang
+          brew install python@3.12 xcodegen zstd glslang unar
           echo "$(brew --prefix python@3.12)/bin" >> "$GITHUB_PATH"
 
       - name: Install Python dependencies
@@ -41,18 +41,17 @@ jobs:
           "$RUNNER_TEMP/nx-venv/bin/python" -m pip install \
             lz4 "capstone>=5,<6" fonttools nsz zbic backports.zstd gdown
 
-      - name: Download A Short Hike NSP and keys
+      - name: Download A Short Hike archives and keys
         env:
           BASE_URL: ${{ secrets.SHORT_HIKE_BASE_NSP_URL }}
           UPDATE_URL: ${{ secrets.SHORT_HIKE_UPDATE_NSP_URL }}
-          DLC_FOLDER_URL: ${{ secrets.SHORT_HIKE_DLC_FOLDER_URL }}
           PROD_KEYS: ${{ secrets.PROD_KEYS }}
         run: |
           set -euo pipefail
 
           GAME_DIR="$RUNNER_TEMP/short-hike"
-          DLC_DIR="$RUNNER_TEMP/short-hike-dlc"
-          mkdir -p "$GAME_DIR" "$DLC_DIR"
+          ARCHIVE_DIR="$RUNNER_TEMP/short-hike-archives"
+          mkdir -p "$GAME_DIR" "$ARCHIVE_DIR"
 
           test -n "$BASE_URL" || {
             echo "Missing SHORT_HIKE_BASE_NSP_URL secret"
@@ -66,30 +65,44 @@ jobs:
 
           GDOWN="$RUNNER_TEMP/nx-venv/bin/gdown"
 
-          "$GDOWN" "$BASE_URL" \
-            -O "$GAME_DIR/A_Short_Hike_Base.nsp"
+          "$GDOWN" "$BASE_URL" -O "$ARCHIVE_DIR/base.rar"
 
           if [ -n "$UPDATE_URL" ]; then
-            "$GDOWN" "$UPDATE_URL" \
-              -O "$GAME_DIR/A_Short_Hike_Update.nsp"
+            "$GDOWN" "$UPDATE_URL" -O "$ARCHIVE_DIR/update.rar"
           fi
 
-          if [ -n "$DLC_FOLDER_URL" ]; then
-            "$GDOWN" --folder "$DLC_FOLDER_URL" -O "$DLC_DIR"
-            find "$DLC_DIR" -type f -iname '*.nsp' \
-              -exec cp {} "$GAME_DIR/" \;
-          fi
+          echo "=== Downloaded archives ==="
+          ls -lh "$ARCHIVE_DIR"
+
+          for archive in "$ARCHIVE_DIR"/*.rar; do
+            [ -f "$archive" ] || continue
+            echo "Extracting $archive"
+            unar -f -o "$GAME_DIR" "$archive"
+          done
+
+          echo "=== Extracted files ==="
+          find "$GAME_DIR" -type f -print
+
+          echo "=== Locating NSP files ==="
+          find "$GAME_DIR" -type f -iname '*.nsp' -print
+
+          NSP_COUNT="$(find "$GAME_DIR" -type f -iname '*.nsp' | wc -l | tr -d ' ')"
+
+          echo "NSP files found: $NSP_COUNT"
+
+          test "$NSP_COUNT" -ge 1 || {
+            echo "No NSP files found after RAR extraction."
+            exit 1
+          }
 
           printf '%s' "$PROD_KEYS" > "$RUNNER_TEMP/prod.keys"
-
-          NSP_COUNT="$(find "$GAME_DIR" -maxdepth 1 -type f -iname '*.nsp' | wc -l | tr -d ' ')"
-
-          echo "NSP files prepared: $NSP_COUNT"
-          test "$NSP_COUNT" -ge 1
-          test -s "$GAME_DIR/A_Short_Hike_Base.nsp"
           test -s "$RUNNER_TEMP/prod.keys"
 
-          ls -lh "$GAME_DIR"
+      - name: Diagnose extracted game files
+        run: |
+          set -euo pipefail
+          find "$RUNNER_TEMP/short-hike" -type f -iname '*.nsp' \
+            -exec file {} \;
 
       - name: Build unsigned A Short Hike IPA
         working-directory: nxnative
@@ -105,6 +118,8 @@ jobs:
             --allow-other-metal \
             -o "$RUNNER_TEMP/A-Short-Hike.ipa"
 
+          test -s "$RUNNER_TEMP/A-Short-Hike.ipa"
+
       - name: Upload IPA and build diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -112,8 +127,8 @@ jobs:
           name: a-short-hike-no-bc-ipa
           path: |
             ${{ runner.temp }}/A-Short-Hike.ipa
-            ${{ runner.temp }}/short-hike/*_build/logs/**
-            ${{ runner.temp }}/short-hike/*_build/profile/**
+            ${{ runner.temp }}/short-hike/**/*_build/logs/**
+            ${{ runner.temp }}/short-hike/**/*_build/profile/**
           if-no-files-found: warn
           retention-days: 7
 
