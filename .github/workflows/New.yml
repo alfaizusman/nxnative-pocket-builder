@@ -1,13 +1,8 @@
-name: Build NxNative iOS IPA (RAR + Older Device Support)
+name: Build NxNative iOS IPA (Single IPA + RAR Support)
 
 on:
   workflow_dispatch:
     inputs:
-      separate_romfs:
-        description: "Split RomFS into a separate file (recommended for large games / AltStore)"
-        required: false
-        default: true
-        type: boolean
       extra_flags:
         description: "Additional flags for build_ipa_from_nsp.py"
         required: false
@@ -45,8 +40,8 @@ jobs:
       - name: Install Homebrew & Python dependencies
         run: |
           brew install xcodegen zstd glslang unar
-          python3 -m pip install --upgrade pip
-          python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'" gdown
+          python3 -m pip install --break-system-packages --upgrade pip
+          python3 -m pip install --break-system-packages lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'" gdown
 
       - name: Download and Extract Game Files (.rar / .zip / .7z)
         env:
@@ -73,21 +68,13 @@ jobs:
 
       - name: Build iOS IPA
         run: |
-          ROMFS_FLAG=""
-          if [ "${{ inputs.separate_romfs }}" == "true" ]; then
-            ROMFS_FLAG="--romfs separate"
-          fi
-
           python3 nxnative/scripts/build_ipa_from_nsp.py game_files \
             -k keys/prod.keys \
-            $ROMFS_FLAG \
             ${{ inputs.extra_flags }}
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: NxNative-iOS-Build
-          path: |
-            game_files/*.ipa
-            game_files/*.img
+          path: game_files/*.ipa
           if-no-files-found: error
