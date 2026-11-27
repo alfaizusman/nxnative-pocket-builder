@@ -1,0 +1,343 @@
+name: High on Life - IPA (No-BC)
+
+"on":
+  workflow_dispatch:
+    inputs:
+      drive_folder_id:
+        description: "Google Drive folder ID holding the High on Life NSP/XCI/NSZ files (base + update + DLC)"
+        required: true
+        default: ""
+      output_folder_id:
+        description: "Drive folder ID to put the finished IPA in (empty = the same folder as the game files)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out NXNative No-BC
+        uses: actions/checkout@v4
+        with:
+          repository: mianmuhammadse/nxnative
+          ref: no-bc
+          path: nxnative
+
+      - name: Check available disk space
+        run: df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.2.app
+          xcodebuild -version
+          xcodebuild -downloadComponent MetalToolchain
+          brew update
+          brew install python@3.12 xcodegen zstd glslang
+          echo "$(brew --prefix python@3.12)/bin" >> "$GITHUB_PATH"
+
+      - name: Install Python dependencies
+        run: |
+          python3.12 -m venv "$RUNNER_TEMP/nx-venv"
+          "$RUNNER_TEMP/nx-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/nx-venv/bin/python" -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic backports.zstd
+
+      - name: Free unused build caches
+        run: |
+          set -euo pipefail
+          brew cleanup -s -f || true
+          "$RUNNER_TEMP/nx-venv/bin/python" -m pip cache purge || true
+          rm -rf "$HOME/Library/Developer/Xcode/DerivedData"
+          echo "Disk space after cleanup:"
+          df -h /
+
+      - name: Download game from Google Drive and write keys
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          FOLDER_ID: ${{ inputs.drive_folder_id }}
+          PROD_KEYS: ${{ secrets.PROD_KEYS }}
+        run: |
+          set -euo pipefail
+          GAME_DIR="$RUNNER_TEMP/highonlife"
+          mkdir -p "$GAME_DIR"
+
+          for name in GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_REFRESH_TOKEN FOLDER_ID PROD_KEYS; do
+            test -n "${!name}" || { echo "Missing required secret or input: $name"; exit 1; }
+          done
+
+          GAME_DIR="$GAME_DIR" "$RUNNER_TEMP/nx-venv/bin/python" - <<'PY'
+          import hashlib, json, os, time, urllib.error, urllib.parse, urllib.request
+
+          GAME_EXT = (".nsp", ".xci", ".nsz", ".xcz")
+
+          def token():
+              data = urllib.parse.urlencode({
+                  "client_id": os.environ["GOOGLE_CLIENT_ID"].strip(),
+                  "client_secret": os.environ["GOOGLE_CLIENT_SECRET"].strip(),
+                  "refresh_token": os.environ["GOOGLE_REFRESH_TOKEN"].strip(),
+                  "grant_type": "refresh_token",
+              }).encode()
+              try:
+                  with urllib.request.urlopen("https://oauth2.googleapis.com/token", data) as r:
+                      return json.load(r)["access_token"]
+              except urllib.error.HTTPError as e:
+                  print("GOOGLE TOKEN ERROR %d: %s" % (e.code, e.read().decode()), flush=True)
+                  raise
+
+          def api(url):
+              req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token()})
+              return urllib.request.urlopen(req)
+
+          params = {
+              "q": "'%s' in parents and trashed=false" % os.environ["FOLDER_ID"].strip(),
+              "fields": "nextPageToken,files(id,name,size,md5Checksum)",
+              "pageSize": 1000,
+              "supportsAllDrives": "true",
+              "includeItemsFromAllDrives": "true",
+          }
+          files = []
+          while True:
+              page_url = "https://www.googleapis.com/drive/v3/files?" + urllib.parse.urlencode(params)
+              page = json.load(api(page_url))
+              files.extend(page.get("files", []))
+              next_page = page.get("nextPageToken")
+              if not next_page:
+                  break
+              params["pageToken"] = next_page
+          # Only game files: the folder may also hold finished IPAs or other things
+          games = [f for f in files if f["name"].lower().endswith(GAME_EXT)]
+          print("Folder holds %d file(s), %d game file(s)" % (len(files), len(games)), flush=True)
+          if not games:
+              raise SystemExit("No .nsp/.xci/.nsz/.xcz files found in that Drive folder")
+
+          def download(f, dest):
+              md5 = hashlib.md5()
+              got = 0
+              with api("https://www.googleapis.com/drive/v3/files/%s?alt=media&supportsAllDrives=true" % f["id"]) as r, open(dest, "wb") as out:
+                  while True:
+                      chunk = r.read(8 * 1024 * 1024)
+                      if not chunk:
+                          break
+                      out.write(chunk)
+                      md5.update(chunk)
+                      got += len(chunk)
+              if f.get("size") and got != int(f["size"]):
+                  raise IOError("size mismatch: got %d, expected %s" % (got, f["size"]))
+              if f.get("md5Checksum") and md5.hexdigest() != f["md5Checksum"]:
+                  raise IOError("md5 mismatch: got %s, expected %s" % (md5.hexdigest(), f["md5Checksum"]))
+
+          bad = []
+          for f in games:
+              dest = os.path.join(os.environ["GAME_DIR"], f["name"])
+              print("Downloading", f["name"], f.get("size"), flush=True)
+              for attempt in range(1, 5):
+                  try:
+                      download(f, dest)
+                      print("  verified OK", flush=True)
+                      break
+                  except Exception as e:
+                      print("  attempt %d failed: %s" % (attempt, e), flush=True)
+                      time.sleep(5 * attempt)
+              else:
+                  bad.append(f["name"])
+
+          if bad:
+              raise SystemExit("These files did not download intact (the copy on Drive itself may be bad): " + ", ".join(bad))
+          PY
+
+          printf '%s' "$PROD_KEYS" > "$RUNNER_TEMP/prod.keys"
+          test -s "$RUNNER_TEMP/prod.keys"
+          echo "Total game files prepared: $(find "$GAME_DIR" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          ls -lh "$GAME_DIR"
+          df -h /
+
+      - name: Build unsigned High on Life IPA
+        working-directory: nxnative
+        env:
+          DM_NO_BC_ASTC: all
+        run: |
+          set -euo pipefail
+          BUILD_LOG="$RUNNER_TEMP/highonlife-build.log"
+          "$RUNNER_TEMP/nx-venv/bin/python" scripts/build_ipa_from_nsp.py \
+            "$RUNNER_TEMP/highonlife" \
+            -k "$RUNNER_TEMP/prod.keys" \
+            --allow-other-metal \
+            --romfs separate \
+            --keep-extracted \
+            -o "$RUNNER_TEMP/HIGH-ON-LIFE.ipa" 2>&1 | tee "$BUILD_LOG"
+
+          python3 - "$BUILD_LOG" "$GITHUB_ENV" <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          log_path, github_env = map(Path, sys.argv[1:])
+          marker = "game files: separate (DM_COPY_ROMFS=NO), left out of the app; the image stays at "
+          matches = []
+          for line in log_path.read_text(errors="replace").splitlines():
+              if marker in line:
+                  matches.append(Path(line.split(marker, 1)[1].strip()))
+
+          if not matches:
+              raise SystemExit("Build log did not report the separate RomFS image path")
+          romfs_image = matches[-1].expanduser().resolve()
+          if not romfs_image.is_file():
+              raise SystemExit(f"Separate RomFS image does not exist: {romfs_image}")
+          if romfs_image.stat().st_size == 0:
+              raise SystemExit(f"Separate RomFS image is empty: {romfs_image}")
+
+          with github_env.open("a") as out:
+              out.write(f"ROMFS_IMAGE={romfs_image}\n")
+          print(f"Verified separate RomFS image: {romfs_image} ({romfs_image.stat().st_size:,} bytes)")
+          PY
+
+      - name: Upload IPA and separate game data to Google Drive
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          OUTPUT_FOLDER_ID: ${{ inputs.output_folder_id }}
+          DRIVE_FOLDER_ID: ${{ inputs.drive_folder_id }}
+          IPA: ${{ runner.temp }}/HIGH-ON-LIFE.ipa
+          ROMFS_IMAGE: ${{ env.ROMFS_IMAGE }}
+        run: |
+          set -euo pipefail
+          test -s "$IPA" || { echo "::error::No IPA was produced"; exit 1; }
+          test -s "$ROMFS_IMAGE" || { echo "::error::Separate RomFS image is missing or empty"; exit 1; }
+          ls -lh "$IPA" "$ROMFS_IMAGE"
+          python3 - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          CHUNK_SIZE = 64 * 1024 * 1024  # Google Drive requires non-final chunks in 256 KiB multiples.
+          FOLDER_ID = os.environ.get("OUTPUT_FOLDER_ID", "").strip() or os.environ["DRIVE_FOLDER_ID"].strip()
+          TOKEN_CACHE = {"value": None, "time": 0.0}
+
+          def access_token():
+              if TOKEN_CACHE["value"] and time.time() - TOKEN_CACHE["time"] < 2400:
+                  return TOKEN_CACHE["value"]
+              form = urllib.parse.urlencode({
+                  "client_id": os.environ["GOOGLE_CLIENT_ID"].strip(),
+                  "client_secret": os.environ["GOOGLE_CLIENT_SECRET"].strip(),
+                  "refresh_token": os.environ["GOOGLE_REFRESH_TOKEN"].strip(),
+                  "grant_type": "refresh_token",
+              }).encode()
+              request = urllib.request.Request("https://oauth2.googleapis.com/token", data=form)
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  TOKEN_CACHE["value"] = json.load(response)["access_token"]
+              TOKEN_CACHE["time"] = time.time()
+              return TOKEN_CACHE["value"]
+
+          def next_offset(headers):
+              value = headers.get("Range", "")
+              return int(value.rsplit("-", 1)[1]) + 1 if value else 0
+
+          def upload_file(path, remote_name):
+              size = os.path.getsize(path)
+              metadata = {"name": remote_name, "parents": [FOLDER_ID]}
+              request = urllib.request.Request(
+                  "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true",
+                  data=json.dumps(metadata).encode(),
+                  method="POST",
+                  headers={
+                      "Authorization": "Bearer " + access_token(),
+                      "Content-Type": "application/json; charset=UTF-8",
+                      "X-Upload-Content-Type": "application/octet-stream",
+                      "X-Upload-Content-Length": str(size),
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  session_url = response.headers.get("Location")
+              if not session_url:
+                  raise RuntimeError("Google Drive did not return a resumable upload URL")
+
+              def send(data, content_range):
+                  req = urllib.request.Request(
+                      session_url,
+                      data=data,
+                      method="PUT",
+                      headers={
+                          "Authorization": "Bearer " + access_token(),
+                          "Content-Length": str(len(data)),
+                          "Content-Range": content_range,
+                      },
+                  )
+                  try:
+                      with urllib.request.urlopen(req, timeout=600) as response:
+                          return response.status, response.read(), response.headers
+                  except urllib.error.HTTPError as error:
+                      if error.code == 308:
+                          return 308, b"", error.headers
+                      raise
+
+              def query_server_offset():
+                  status, body, headers = send(b"", f"bytes */{size}")
+                  if status in (200, 201):
+                      return size, json.loads(body)
+                  if status == 308:
+                      return next_offset(headers), None
+                  raise RuntimeError(f"Unexpected Drive upload status while checking offset: {status}")
+
+              offset = 0
+              result = None
+              with open(path, "rb") as source:
+                  while offset < size:
+                      source.seek(offset)
+                      chunk = source.read(min(CHUNK_SIZE, size - offset))
+                      if not chunk:
+                          raise RuntimeError(f"Unexpected end of file while uploading {remote_name}")
+                      end = offset + len(chunk) - 1
+                      for attempt in range(1, 7):
+                          try:
+                              status, body, headers = send(chunk, f"bytes {offset}-{end}/{size}")
+                              if status in (200, 201):
+                                  result = json.loads(body)
+                                  offset = size
+                              else:
+                                  offset = next_offset(headers)
+                              break
+                          except Exception as error:
+                              print(f"{remote_name}: upload attempt {attempt} failed: {error}", flush=True)
+                              if attempt == 6:
+                                  raise
+                              time.sleep(5 * attempt)
+                              offset, completed = query_server_offset()
+                              if completed is not None:
+                                  result = completed
+                                  break
+                      print(f"{remote_name}: uploaded {offset:,} / {size:,} bytes", flush=True)
+                      if result is not None:
+                          break
+
+              if result is None:
+                  raise RuntimeError(f"Drive upload for {remote_name} ended without a completed response")
+              print(f"Drive upload complete: {remote_name} (file ID: {result.get('id', 'unknown')})", flush=True)
+
+          upload_file(os.environ["IPA"], "HIGH-ON-LIFE.ipa")
+          upload_file(os.environ["ROMFS_IMAGE"], "HIGH-ON-LIFE-RomFS.img")
+          PY
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: high-on-life-build-logs
+          path: |
+            ${{ runner.temp }}/highonlife/*_build/logs/**
+            ${{ runner.temp }}/highonlife/*_build/profile/**
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Remove temporary keys
+        if: always()
+        run: rm -f "$RUNNER_TEMP/prod.keys"
