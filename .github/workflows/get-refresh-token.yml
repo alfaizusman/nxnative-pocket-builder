@@ -1,0 +1,59 @@
+name: Get Google Refresh Token
+
+on:
+  workflow_dispatch:
+    inputs:
+      auth_code:
+        description: "Paste the code from http://127.0.0.1/?code=... (leave blank on Run 1)"
+        required: false
+        default: ""
+
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Auth URL or Exchange Code
+        env:
+          CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          AUTH_CODE: ${{ inputs.auth_code }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.parse, urllib.request
+
+          client_id = os.environ["CLIENT_ID"].strip()
+          client_secret = os.environ["CLIENT_SECRET"].strip()
+          code = os.environ["AUTH_CODE"].strip()
+          redirect_uri = "http://127.0.0.1"
+          scope = "https://www.googleapis.com/auth/drive"
+
+          if not code:
+              url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode({
+                  "client_id": client_id,
+                  "redirect_uri": redirect_uri,
+                  "response_type": "code",
+                  "scope": scope,
+                  "access_type": "offline",
+                  "prompt": "consent",
+              })
+              print("OPEN THIS URL IN YOUR BROWSER:\n")
+              print(url)
+              print("\nAfter approving, copy the 'code' query value from the redirected URL and run this workflow again.")
+          else:
+              if "code=" in code:
+                  parsed = urllib.parse.urlparse(code)
+                  code = urllib.parse.parse_qs(parsed.query).get("code", [code])[0]
+              form = urllib.parse.urlencode({
+                  "client_id": client_id,
+                  "client_secret": client_secret,
+                  "code": code,
+                  "grant_type": "authorization_code",
+                  "redirect_uri": redirect_uri,
+              }).encode()
+              req = urllib.request.Request("https://oauth2.googleapis.com/token", data=form)
+              with urllib.request.urlopen(req) as resp:
+                  data = json.loads(resp.read().decode())
+              print(json.dumps(data, indent=2))
+              if "refresh_token" in data:
+                  print("\nSAVE THIS AS GOOGLE_REFRESH_TOKEN:\n" + data["refresh_token"])
+          PY
